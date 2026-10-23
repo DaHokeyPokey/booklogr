@@ -1,4 +1,7 @@
+import logging
+
 import pytest
+import requests
 from flask import Flask
 
 from api.book_provider import BookProvider
@@ -13,6 +16,14 @@ def provider():
     )
     with app.app_context():
         yield BookProvider()
+
+
+@pytest.fixture(autouse=True)
+def reject_unmatched_http(monkeypatch):
+    def reject(*args, **kwargs):
+        raise AssertionError("Unexpected HTTP request in offline provider test")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", reject)
 
 
 def test_primary_search_result_does_not_call_fallback(provider, monkeypatch):
@@ -59,8 +70,24 @@ def test_missing_primary_get_uses_fallback_once(provider, monkeypatch):
     assert calls == [("primary", "isbn"), ("fallback", "isbn")]
 
 
+def test_primary_get_error_uses_fallback_once(provider, monkeypatch):
+    calls = []
+    fallback = {"title": "Fallback", "subtitle": None, "author": "Author"}
+
+    def fetch(provider_name, isbn):
+        calls.append((provider_name, isbn))
+        if provider_name == "primary":
+            raise RuntimeError("primary failure")
+        return fallback
+
+    monkeypatch.setattr(provider, "_fetch_get", fetch)
+
+    assert provider.get("isbn") == fallback
+    assert calls == [("primary", "isbn"), ("fallback", "isbn")]
+
+
 def test_primary_and_fallback_search_errors_return_none_without_sensitive_output(
-    provider, monkeypatch, capsys
+    provider, monkeypatch, capsys, caplog
 ):
     calls = []
 
@@ -70,11 +97,92 @@ def test_primary_and_fallback_search_errors_return_none_without_sensitive_output
 
     monkeypatch.setattr(provider, "_fetch_search", fail)
 
-    assert provider.search("secret-query") is None
+    with caplog.at_level(logging.WARNING, logger="api.book_provider"):
+        assert provider.search("secret-query") is None
+
     assert calls == [("primary", "secret-query"), ("fallback", "secret-query")]
     captured = capsys.readouterr()
     assert "secret-query" not in captured.out + captured.err
     assert "private.example" not in captured.out + captured.err
+    assert "secret-query" not in caplog.text
+    assert "private.example" not in caplog.text
+    assert [record.message for record in caplog.records] == [
+        "Primary book search provider failed",
+        "Fallback book search provider failed",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_primary_and_fallback_get_errors_return_none_without_sensitive_output(
+    provider, monkeypatch, capsys, caplog
+):
+    calls = []
+
+    def fail(provider_name, isbn):
+        calls.append((provider_name, isbn))
+        raise RuntimeError("secret-isbn https://private.example/token")
+
+    monkeypatch.setattr(provider, "_fetch_get", fail)
+
+    with caplog.at_level(logging.WARNING, logger="api.book_provider"):
+        assert provider.get("secret-isbn") is None
+
+    assert calls == [("primary", "secret-isbn"), ("fallback", "secret-isbn")]
+    captured = capsys.readouterr()
+    assert "secret-isbn" not in captured.out + captured.err
+    assert "private.example" not in captured.out + captured.err
+    assert "secret-isbn" not in caplog.text
+    assert "private.example" not in caplog.text
+    assert [record.message for record in caplog.records] == [
+        "Primary book detail provider failed",
+        "Fallback book detail provider failed",
+    ]
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_public_search_dispatches_to_custom_primary_url_without_fallback(provider):
+    provider.primary_provider = "https://primary.example/metadata"
+    provider.fallback_provider = "https://fallback.example/metadata"
+    session = RecordingSession(
+        FakeResponse(
+            [
+                {
+                    "isbn_13": ["9780000000001"],
+                    "title": "Primary title",
+                    "author_names": [],
+                }
+            ]
+        )
+    )
+    provider.session = session
+
+    assert provider.search("query") == [
+        {"isbn": "9780000000001", "title": "Primary title", "author": "Unknown"}
+    ]
+    assert session.calls == [
+        (
+            "https://primary.example/metadata/v1/search/query",
+            {"params": {"limit": 10, "sort": "relevance"}, "timeout": 30},
+        )
+    ]
+
+
+def test_public_get_dispatches_to_custom_primary_url_with_defaults(provider):
+    provider.primary_provider = "https://primary.example/metadata"
+    provider.fallback_provider = "https://fallback.example/metadata"
+    session = RecordingSession(FakeResponse({}))
+    provider.session = session
+
+    assert provider.get("isbn") == {
+        "title": None,
+        "subtitle": None,
+        "author": "Unknown",
+        "description": "",
+        "total_pages": 0,
+    }
+    assert session.calls == [
+        ("https://primary.example/metadata/v1/edition/isbn", {"timeout": 30})
+    ]
 
 
 class FakeResponse:
