@@ -106,9 +106,13 @@ def test_primary_and_fallback_search_errors_return_none_without_sensitive_output
     assert "private.example" not in captured.out + captured.err
     assert "secret-query" not in caplog.text
     assert "private.example" not in caplog.text
+    assert captured.out.splitlines() == [
+        "Primary book search provider primary failed",
+        "Fallback book search provider fallback failed",
+    ]
     assert [record.message for record in caplog.records] == [
-        "Primary book search provider failed",
-        "Fallback book search provider failed",
+        "Primary book search provider primary failed",
+        "Fallback book search provider fallback failed",
     ]
     assert all(record.exc_info is None for record in caplog.records)
 
@@ -133,9 +137,13 @@ def test_primary_and_fallback_get_errors_return_none_without_sensitive_output(
     assert "private.example" not in captured.out + captured.err
     assert "secret-isbn" not in caplog.text
     assert "private.example" not in caplog.text
+    assert captured.out.splitlines() == [
+        "Primary book detail provider primary failed",
+        "Fallback book detail provider fallback failed",
+    ]
     assert [record.message for record in caplog.records] == [
-        "Primary book detail provider failed",
-        "Fallback book detail provider failed",
+        "Primary book detail provider primary failed",
+        "Fallback book detail provider fallback failed",
     ]
     assert all(record.exc_info is None for record in caplog.records)
 
@@ -183,6 +191,29 @@ def test_public_get_dispatches_to_custom_primary_url_with_defaults(provider):
     assert session.calls == [
         ("https://primary.example/metadata/v1/edition/isbn", {"timeout": 30})
     ]
+
+
+def test_primary_and_fallback_failure_messages_use_safe_custom_provider_labels(
+    provider, monkeypatch, capsys, caplog
+):
+    provider.primary_provider = "https://user:secret@primary.example/private?token=secret"
+    provider.fallback_provider = "https://fallback.example/private?secret=secret"
+
+    def fail(provider_name, query):
+        raise RuntimeError("secret-query")
+
+    monkeypatch.setattr(provider, "_fetch_search", fail)
+
+    with caplog.at_level(logging.WARNING, logger="api.book_provider"):
+        assert provider.search("secret-query") is None
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err + caplog.text
+    assert "primary.example" in output
+    assert "fallback.example" in output
+    assert "secret" not in output
+    assert "/private" not in output
+    assert "secret-query" not in output
 
 
 class FakeResponse:

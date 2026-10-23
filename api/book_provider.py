@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlsplit
 
 import requests
 from flask import current_app
@@ -21,18 +22,30 @@ class BookProvider:
             "Accept": "application/json"
         })
 
+    @staticmethod
+    def _provider_label(provider):
+        try:
+            parsed = urlsplit(provider if "://" in provider else f"//{provider}")
+            return parsed.hostname or "custom"
+        except ValueError:
+            return "custom"
+
     def search(self, query):
         try:
             result = self._fetch_search(self.primary_provider, query)
             if result:
                 return result
         except Exception:
-            logger.warning("Primary book search provider failed")
+            message = f"Primary book search provider {self._provider_label(self.primary_provider)} failed"
+            print(message)
+            logger.warning(message)
 
         try:
             return self._fetch_search(self.fallback_provider, query)
         except Exception:
-            logger.warning("Fallback book search provider failed")
+            message = f"Fallback book search provider {self._provider_label(self.fallback_provider)} failed"
+            print(message)
+            logger.warning(message)
             return None
 
     def get(self, isbn):
@@ -41,12 +54,16 @@ class BookProvider:
             if result:
                 return result
         except Exception:
-            logger.warning("Primary book detail provider failed")
+            message = f"Primary book detail provider {self._provider_label(self.primary_provider)} failed"
+            print(message)
+            logger.warning(message)
 
         try:
             return self._fetch_get(self.fallback_provider, isbn)
         except Exception:
-            logger.warning("Fallback book detail provider failed")
+            message = f"Fallback book detail provider {self._provider_label(self.fallback_provider)} failed"
+            print(message)
+            logger.warning(message)
             return None
     
     def _fetch_search(self, provider, query):
